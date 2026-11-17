@@ -46,12 +46,21 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
         return null;
       }
-      if (code === 'auth/popup-blocked') {
+      if (code === 'auth/unauthorized-domain') {
+        const host = typeof window !== 'undefined' ? window.location.hostname : 'ce domaine';
+        setAuthError(
+          `Domaine non autorisé (${host}). Ajoutez "${host}" dans Firebase Console → Authentication → Settings → Authorized domains.`
+        );
+      } else if (code === 'auth/popup-blocked') {
         setAuthError(
           'La fenêtre Google a été bloquée par votre navigateur. Autorisez les pop-ups pour vous connecter.'
         );
+      } else if (code === 'auth/network-request-failed') {
+        setAuthError('Erreur réseau lors de la connexion Google. Vérifiez votre connexion.');
       } else {
-        setAuthError('Impossible de finaliser la connexion Google. Veuillez réessayer.');
+        setAuthError(
+          `Impossible de finaliser la connexion Google (${code || 'erreur inconnue'}).`
+        );
       }
       return null;
     } finally {

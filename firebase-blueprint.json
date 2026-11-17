@@ -263,6 +263,128 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "DuelRoom": {
+      "title": "DuelRoom",
+      "description": "Real-time 5-round 1v1 duel room synchronized via Cloud Firestore when playing without a WebSocket backend.",
+      "type": "object",
+      "properties": {
+        "roomId": {
+          "type": "string",
+          "description": "4 to 8 character room code.",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[A-Z0-9]+$"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "playing", "finished"],
+          "description": "Current room lifecycle state."
+        },
+        "challengeIds": {
+          "type": "array",
+          "description": "Fixed 5 challenge IDs for the duel."
+        },
+        "currentRound": {
+          "type": "integer",
+          "description": "Current active round index (0..4)."
+        },
+        "hostUserId": {
+          "type": "string",
+          "description": "Firebase Auth UID of room host.",
+          "minLength": 6,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "hostName": {
+          "type": "string",
+          "description": "Host player name.",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "hostCountryCode": {
+          "type": "string",
+          "description": "Host country ISO code.",
+          "minLength": 2,
+          "maxLength": 2,
+          "pattern": "^[A-Z]{2}$"
+        },
+        "hostScore": {
+          "type": "integer",
+          "description": "Host cumulative duel score."
+        },
+        "hostRoundDone": {
+          "type": "boolean",
+          "description": "Whether host has completed the current round."
+        },
+        "hostLastCorrect": {
+          "type": "boolean",
+          "description": "Whether host answered the last submitted round correctly."
+        },
+        "guestUserId": {
+          "type": "string",
+          "description": "Firebase Auth UID of guest player or empty string while waiting.",
+          "maxLength": 128
+        },
+        "guestName": {
+          "type": "string",
+          "description": "Guest player name or empty string while waiting.",
+          "maxLength": 24
+        },
+        "guestCountryCode": {
+          "type": "string",
+          "description": "Guest country ISO code or empty string while waiting.",
+          "maxLength": 2
+        },
+        "guestScore": {
+          "type": "integer",
+          "description": "Guest cumulative duel score."
+        },
+        "guestRoundDone": {
+          "type": "boolean",
+          "description": "Whether guest has completed the current round."
+        },
+        "guestLastCorrect": {
+          "type": "boolean",
+          "description": "Whether guest answered the last submitted round correctly."
+        },
+        "winnerUserId": {
+          "type": "string",
+          "description": "Winner UID or empty string on tie or unfinished duel.",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last update timestamp."
+        }
+      },
+      "required": [
+        "roomId",
+        "status",
+        "challengeIds",
+        "currentRound",
+        "hostUserId",
+        "hostName",
+        "hostCountryCode",
+        "hostScore",
+        "hostRoundDone",
+        "hostLastCorrect",
+        "guestUserId",
+        "guestName",
+        "guestCountryCode",
+        "guestScore",
+        "guestRoundDone",
+        "guestLastCorrect",
+        "winnerUserId",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -283,6 +405,12 @@
         "$ref": "#/entities/SharedChallenge"
       },
       "description": "Authenticated user's shared challenge records with terminal outcome locking."
+    },
+    "/duelRooms/{roomId}": {
+      "schema": {
+        "$ref": "#/entities/DuelRoom"
+      },
+      "description": "Serverless Firestore 1v1 Live Duel room state for static hosting deployments."
     }
   }
 }

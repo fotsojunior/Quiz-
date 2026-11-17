@@ -243,5 +243,125 @@ service cloud.firestore {
         && isVerified()
         && existing().creatorUserId == request.auth.uid;
     }
+
+    function isValidDuelRoom(data, roomId) {
+      return data.keys().hasAll([
+          'roomId', 'status', 'challengeIds', 'currentRound',
+          'hostUserId', 'hostName', 'hostCountryCode', 'hostScore', 'hostRoundDone', 'hostLastCorrect',
+          'guestUserId', 'guestName', 'guestCountryCode', 'guestScore', 'guestRoundDone', 'guestLastCorrect',
+          'winnerUserId', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'roomId', 'status', 'challengeIds', 'currentRound',
+          'hostUserId', 'hostName', 'hostCountryCode', 'hostScore', 'hostRoundDone', 'hostLastCorrect',
+          'guestUserId', 'guestName', 'guestCountryCode', 'guestScore', 'guestRoundDone', 'guestLastCorrect',
+          'winnerUserId', 'createdAt', 'updatedAt'
+        ])
+        && data.roomId is string && data.roomId == roomId && data.roomId.size() >= 4 && data.roomId.size() <= 16 && data.roomId.matches('^[A-Z0-9]+$')
+        && data.status is string && data.status in ['waiting', 'playing', 'finished']
+        && data.challengeIds is list && data.challengeIds.size() == 5 && data.challengeIds[0] is int
+        && data.currentRound is int && data.currentRound >= 0 && data.currentRound <= 4
+        && data.hostUserId is string && isValidId(data.hostUserId)
+        && data.hostName is string && data.hostName.size() >= 1 && data.hostName.size() <= 24
+        && isCountryCode(data.hostCountryCode)
+        && data.hostScore is int && data.hostScore >= 0 && data.hostScore <= 10000
+        && data.hostRoundDone is bool
+        && data.hostLastCorrect is bool
+        && data.guestUserId is string && (data.guestUserId == '' || isValidId(data.guestUserId))
+        && data.guestName is string && data.guestName.size() <= 24
+        && isOptionalCountryCode(data.guestCountryCode)
+        && data.guestScore is int && data.guestScore >= 0 && data.guestScore <= 10000
+        && data.guestRoundDone is bool
+        && data.guestLastCorrect is bool
+        && data.winnerUserId is string && (data.winnerUserId == '' || isValidId(data.winnerUserId))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // --- Collection: /duelRooms/{roomId} ---
+    match /duelRooms/{roomId} {
+      allow get: if isValidId(roomId)
+        && isSignedIn()
+        && isVerified()
+        && (
+          existing().status == 'waiting' ||
+          existing().hostUserId == request.auth.uid ||
+          existing().guestUserId == request.auth.uid
+        );
+
+      allow list: if isSignedIn()
+        && isVerified()
+        && (
+          existing().hostUserId == request.auth.uid ||
+          existing().guestUserId == request.auth.uid
+        );
+
+      allow create: if isValidId(roomId)
+        && isSignedIn()
+        && isVerified()
+        && isValidDuelRoom(incoming(), roomId)
+        && incoming().hostUserId == request.auth.uid
+        && incoming().guestUserId == ''
+        && incoming().status == 'waiting'
+        && incoming().winnerUserId == ''
+        && incoming().currentRound == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(roomId)
+        && isSignedIn()
+        && isVerified()
+        && isValidDuelRoom(incoming(), roomId)
+        && existing().status != 'finished'
+        && incoming().roomId == existing().roomId
+        && incoming().hostUserId == existing().hostUserId
+        && incoming().challengeIds == existing().challengeIds
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Guest joins a waiting room
+          (
+            existing().status == 'waiting' &&
+            existing().guestUserId == '' &&
+            request.auth.uid != existing().hostUserId &&
+            incoming().guestUserId == request.auth.uid &&
+            incoming().guestName.size() >= 1 &&
+            isCountryCode(incoming().guestCountryCode) &&
+            incoming().status == 'playing' &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'guestUserId', 'guestName', 'guestCountryCode', 'status', 'updatedAt'
+            ])
+          )
+          ||
+          // Action: Host submits round outcome / advances round
+          (
+            existing().status == 'playing' &&
+            existing().hostUserId == request.auth.uid &&
+            existing().hostRoundDone == false &&
+            incoming().guestUserId == existing().guestUserId &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'hostScore', 'hostRoundDone', 'hostLastCorrect',
+              'guestRoundDone', 'currentRound', 'status', 'winnerUserId', 'updatedAt'
+            ])
+          )
+          ||
+          // Action: Guest submits round outcome / advances round
+          (
+            existing().status == 'playing' &&
+            existing().guestUserId == request.auth.uid &&
+            existing().guestRoundDone == false &&
+            incoming().guestUserId == existing().guestUserId &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'guestScore', 'guestRoundDone', 'guestLastCorrect',
+              'hostRoundDone', 'currentRound', 'status', 'winnerUserId', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidId(roomId)
+        && isSignedIn()
+        && isVerified()
+        && existing().hostUserId == request.auth.uid;
+    }
   }
 }

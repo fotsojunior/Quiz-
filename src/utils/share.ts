@@ -57,6 +57,8 @@ export function buildChallengeShareUrl(params: {
   shareId?: string | null;
   playerName: string;
   countryCode: string;
+  won?: boolean | null;
+  pointsDelta?: number;
 }): string {
   const url = new URL(window.location.origin);
   url.searchParams.set('defi', String(params.challengeId));
@@ -68,6 +70,12 @@ export function buildChallengeShareUrl(params: {
   }
   if (params.countryCode) {
     url.searchParams.set('pays', params.countryCode);
+  }
+  if (typeof params.won === 'boolean') {
+    url.searchParams.set('won', params.won ? '1' : '0');
+  }
+  if (typeof params.pointsDelta === 'number' && params.pointsDelta !== 0) {
+    url.searchParams.set('pts', String(Math.round(params.pointsDelta)));
   }
   return url.toString();
 }

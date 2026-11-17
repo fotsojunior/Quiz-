@@ -24,9 +24,16 @@ import {
   syncProfileMetaToFirestore,
 } from './services/firestoreProfile';
 import {
+  createFirestoreDuelRoom,
+  joinFirestoreDuelRoom,
+  submitFirestoreDuelRound,
+  subscribeFirestoreDuelRoom,
+} from './services/firestoreDuel';
+import {
   Challenge,
   ChallengeCategory,
   CountryStanding,
+  Difficulty,
   LiveDuelRoom,
   ScoreEvent,
   SharedChallengeInfo,
@@ -36,6 +43,25 @@ import {
 import { buildChallengeShareUrl, shareOrCopyLink } from './utils/share';
 import { soundFX } from './utils/sound';
 
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+
+function apiUrl(path: string): string {
+  return API_BASE ? `${API_BASE}${path}` : path;
+}
+
+async function fetchJsonSafe<T>(path: string, init?: RequestInit): Promise<T | null> {
+  try {
+    const res = await fetch(apiUrl(path), init);
+    const contentType = res.headers.get('content-type') || '';
+    if (!res.ok || !contentType.includes('application/json')) {
+      return null;
+    }
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
 const STORAGE_KEYS = {
   userId: 'nd_user_id',
   profile: 'nd_user_profile',
@@ -44,6 +70,8 @@ const STORAGE_KEYS = {
   name: 'nd_player_name',
   solved: 'nd_solved_ids',
   answered: 'nd_answered_count',
+  standings: 'nd_standings',
+  events: 'nd_recent_events',
 };
 
 function safeStorageGet(key: string): string | null {
@@ -74,6 +102,34 @@ function createFallbackStandings(): CountryStanding[] {
     lastDelta: 0,
     updatedAt: now,
   }));
+}
+
+function loadInitialStandings(): CountryStanding[] {
+  try {
+    const raw = safeStorageGet(STORAGE_KEYS.standings);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length >= 100 && typeof parsed[0]?.code === 'string') {
+        return parsed as CountryStanding[];
+      }
+    }
+  } catch {
+    // Fallback below
+  }
+  return createFallbackStandings();
+}
+
+function loadInitialEvents(): ScoreEvent[] {
+  try {
+    const raw = safeStorageGet(STORAGE_KEYS.events);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.slice(0, 40) as ScoreEvent[];
+    }
+  } catch {
+    // Fallback below
+  }
+  return [];
 }
 
 function createEmptyProfile(params: {
@@ -118,6 +174,8 @@ function parseInitialUrlIntent(): {
   shareId: string | null;
   byName: string | null;
   byCountry: string | null;
+  creatorWon: boolean | null;
+  creatorPointsDelta: number;
 } {
   try {
     const params = new URLSearchParams(window.location.search);
@@ -134,8 +192,20 @@ function parseInitialUrlIntent(): {
     const byName = params.get('by')?.trim().slice(0, 24) || null;
     const rawPays = params.get('pays')?.trim().toUpperCase() || null;
     const byCountry = rawPays && COUNTRY_MAP.has(rawPays) ? rawPays : null;
+    const rawWon = params.get('won');
+    const creatorWon = rawWon === '1' ? true : rawWon === '0' ? false : null;
+    const rawPts = Number(params.get('pts'));
+    const creatorPointsDelta = Number.isFinite(rawPts) ? Math.round(rawPts) : 0;
 
-    return { roomCode: rawRoom, sharedChallengeId, shareId, byName, byCountry };
+    return {
+      roomCode: rawRoom,
+      sharedChallengeId,
+      shareId,
+      byName,
+      byCountry,
+      creatorWon,
+      creatorPointsDelta,
+    };
   } catch {
     return {
       roomCode: null,
@@ -143,6 +213,8 @@ function parseInitialUrlIntent(): {
       shareId: null,
       byName: null,
       byCountry: null,
+      creatorWon: null,
+      creatorPointsDelta: 0,
     };
   }
 }
@@ -166,6 +238,7 @@ export default function App() {
     authError,
     signInWithGoogle,
     signOutGoogle,
+    clearAuthError,
   } = useFirebase();
   const [firestoreError, setFirestoreError] = useState<Error | null>(null);
   if (firestoreError) {
@@ -249,18 +322,32 @@ export default function App() {
     info: SharedChallengeInfo | null;
   } | null>(() => {
     if (!initialIntent.sharedChallengeId) return null;
+    const hasUrlOutcome = initialIntent.creatorWon !== null;
     return {
       challengeId: initialIntent.sharedChallengeId,
       shareId: initialIntent.shareId,
       creatorName: initialIntent.byName || 'Un ami',
       creatorCountryCode: initialIntent.byCountry || 'FR',
-      info: null,
+      info: hasUrlOutcome
+        ? {
+            shareId: initialIntent.shareId || 'url',
+            challengeId: initialIntent.sharedChallengeId,
+            creatorUserId: '',
+            creatorName: initialIntent.byName || 'Un ami',
+            creatorCountryCode: initialIntent.byCountry || 'FR',
+            creatorWon: initialIntent.creatorWon,
+            creatorPointsDelta: initialIntent.creatorPointsDelta,
+            attempts: [],
+            createdAt: Date.now(),
+          }
+        : null,
     };
   });
 
-  const [standings, setStandings] = useState<CountryStanding[]>(createFallbackStandings);
-  const [recentEvents, setRecentEvents] = useState<ScoreEvent[]>([]);
+  const [standings, setStandings] = useState<CountryStanding[]>(loadInitialStandings);
+  const [recentEvents, setRecentEvents] = useState<ScoreEvent[]>(loadInitialEvents);
   const [onlineCount, setOnlineCount] = useState<number>(1);
+  const [backendAvailable, setBackendAvailable] = useState<boolean | null>(null);
 
   const [selectedCategory, setSelectedCategory] = useState<ChallengeCategory | 'all'>(() => {
     if (initialIntent.sharedChallengeId) {
@@ -320,6 +407,10 @@ export default function App() {
   const [isQueued, setIsQueued] = useState(false);
   const [duelRoom, setDuelRoom] = useState<LiveDuelRoom | null>(null);
   const [duelError, setDuelError] = useState<string | null>(null);
+  const [duelTransport, setDuelTransport] = useState<'ws' | 'firestore' | 'local' | null>(null);
+  const firestoreDuelUnsubRef = useRef<(() => void) | null>(null);
+  const localDuelBotTimerRef = useRef<number | null>(null);
+  const finalizedDuelRoomRef = useRef<string | null>(null);
 
   const applyServerProfile = useCallback(
     (profile: UserProfile, syncMetaToo = false) => {
@@ -361,39 +452,46 @@ export default function App() {
     safeStorageSet(STORAGE_KEYS.answered, String(answeredCount));
   }, [answeredCount]);
 
-  // Initialize / hydrate authoritative UserProfile from server
+  // Initialize / hydrate authoritative UserProfile from server (if Express backend exists)
   useEffect(() => {
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 8000);
+    const timer = window.setTimeout(() => controller.abort(), 5000);
     const savedId = safeStorageGet(STORAGE_KEYS.userId);
 
-    fetch('/api/profile/init', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: controller.signal,
-      body: JSON.stringify({
-        userId: userProfile.userId,
-        playerName,
-        countryCode: myCountryCode,
-        rivalCode: rivalCountryCode,
-        localSnapshot: {
-          answeredCount,
-          solvedIds,
-          userPoints: userProfile.userPoints,
-          wins: userProfile.wins,
-          losses: userProfile.losses,
-          bestStreak: userProfile.bestStreak,
-        },
-      }),
-    })
-      .then((res) => (res.ok ? res.json() : null))
+    fetchJsonSafe<{ ok?: boolean }>('/api/health', { signal: controller.signal })
+      .then((health) => {
+        const hasBackend = Boolean(health?.ok);
+        setBackendAvailable(hasBackend);
+        if (!hasBackend) return null;
+        return fetchJsonSafe<{ profile?: UserProfile }>('/api/profile/init', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            userId: userProfile.userId,
+            playerName,
+            countryCode: myCountryCode,
+            rivalCode: rivalCountryCode,
+            localSnapshot: {
+              answeredCount,
+              solvedIds,
+              userPoints: userProfile.userPoints,
+              wins: userProfile.wins,
+              losses: userProfile.losses,
+              bestStreak: userProfile.bestStreak,
+            },
+          }),
+        });
+      })
       .then((data) => {
         if (data?.profile) {
           applyServerProfile(data.profile, Boolean(savedId));
           profileInitializedRef.current = true;
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        setBackendAvailable(false);
+      })
       .finally(() => {
         window.clearTimeout(timer);
       });
@@ -462,11 +560,12 @@ export default function App() {
   // Fetch shared challenge metadata if opened via ?share=...
   useEffect(() => {
     if (!initialIntent.shareId) return;
-    fetch(`/api/shared-challenges/${encodeURIComponent(initialIntent.shareId)}`)
-      .then((res) => (res.ok ? res.json() : null))
+    fetchJsonSafe<{ sharedChallenge?: SharedChallengeInfo }>(
+      `/api/shared-challenges/${encodeURIComponent(initialIntent.shareId)}`
+    )
       .then((data) => {
         if (data?.sharedChallenge) {
-          const sc = data.sharedChallenge as SharedChallengeInfo;
+          const sc = data.sharedChallenge;
           setSharedChallengeContext({
             challengeId: sc.challengeId,
             shareId: sc.shareId,
@@ -482,16 +581,26 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Initial HTTP fetch for immediate hydration with timeout abort
+  // Initial HTTP fetch for immediate hydration when backend is available
   useEffect(() => {
+    if (backendAvailable !== true) return;
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 8000);
+    const timer = window.setTimeout(() => controller.abort(), 6000);
 
-    fetch('/api/standings', { signal: controller.signal })
-      .then((res) => (res.ok ? res.json() : null))
+    fetchJsonSafe<{
+      standings?: CountryStanding[];
+      recentEvents?: ScoreEvent[];
+      onlineCount?: number;
+    }>('/api/standings', { signal: controller.signal })
       .then((data) => {
-        if (data?.standings) setStandings(data.standings);
-        if (data?.recentEvents) setRecentEvents(data.recentEvents);
+        if (data?.standings) {
+          setStandings(data.standings);
+          safeStorageSet(STORAGE_KEYS.standings, JSON.stringify(data.standings));
+        }
+        if (data?.recentEvents) {
+          setRecentEvents(data.recentEvents);
+          safeStorageSet(STORAGE_KEYS.events, JSON.stringify(data.recentEvents));
+        }
         if (typeof data?.onlineCount === 'number') setOnlineCount(data.onlineCount);
       })
       .catch(() => {})
@@ -503,10 +612,11 @@ export default function App() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, []);
+  }, [backendAvailable]);
 
-  // Real-time WebSocket connection with exponential backoff + jitter & network recovery
+  // Real-time WebSocket connection (only when Express/WS backend is detected)
   useEffect(() => {
+    if (backendAvailable !== true) return;
     let alive = true;
     let reconnectTimer: number | null = null;
     let reconnectAttempt = 0;
@@ -529,8 +639,16 @@ export default function App() {
       }
 
       clearReconnectTimer();
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+      let wsEndpoint: string;
+      if (API_BASE) {
+        const parsed = new URL(API_BASE);
+        const proto = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+        wsEndpoint = `${proto}//${parsed.host}/ws`;
+      } else {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        wsEndpoint = `${protocol}//${window.location.host}/ws`;
+      }
+      const ws = new WebSocket(wsEndpoint);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -660,7 +778,7 @@ export default function App() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       wsRef.current?.close();
     };
-  }, []);
+  }, [backendAvailable]);
 
   // Keep WS & server profile metadata synced when user changes country, rival, or name
   useEffect(() => {
@@ -677,8 +795,8 @@ export default function App() {
     }
 
     const syncTimer = window.setTimeout(() => {
-      if (profileInitializedRef.current && userProfile.userId) {
-        fetch('/api/profile/sync-meta', {
+      if (backendAvailable === true && profileInitializedRef.current && userProfile.userId) {
+        fetchJsonSafe<{ profile?: UserProfile }>('/api/profile/sync-meta', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -688,7 +806,6 @@ export default function App() {
             rivalCode: rivalCountryCode,
           }),
         })
-          .then((res) => (res.ok ? res.json() : null))
           .then((data) => {
             if (data?.profile) {
               setUserProfile(data.profile);
@@ -713,7 +830,15 @@ export default function App() {
     }, 350);
 
     return () => window.clearTimeout(syncTimer);
-  }, [authUser, myCountryCode, playerName, rivalCountryCode, userProfile.syncCode, userProfile.userId]);
+  }, [
+    authUser,
+    backendAvailable,
+    myCountryCode,
+    playerName,
+    rivalCountryCode,
+    userProfile.syncCode,
+    userProfile.userId,
+  ]);
 
   const standingsMap = useMemo(
     () => new Map(standings.map((s) => [s.code, s])),
@@ -775,6 +900,173 @@ export default function App() {
     [answeredCount, solvedSet]
   );
 
+  const applyLocalStandaloneOutcome = useCallback(
+    (params: {
+      challengeId: number;
+      title: string;
+      category: ChallengeCategory;
+      difficulty: Difficulty;
+      won: boolean;
+      timeLeftRatio: number;
+      mode: 'solo' | 'duel' | 'shared';
+      overrideCountryDelta?: number;
+      overrideRivalDelta?: number;
+      overrideRivalCode?: string | null;
+      nextStreakValue?: number;
+    }) => {
+      const now = Date.now();
+      const targetRivalCode =
+        params.overrideRivalCode !== undefined ? params.overrideRivalCode : effectiveRivalCode;
+      const clampedRatio = Math.max(0, Math.min(1, Number(params.timeLeftRatio) || 0));
+      const speedBonus = Math.round(clampedRatio * 12);
+      const streakBonus = Math.min(Math.max(0, Math.floor(playerStreak)), 6) * 3;
+      const computedCountryDelta =
+        params.overrideCountryDelta !== undefined
+          ? params.overrideCountryDelta
+          : params.won
+          ? 15 + speedBonus + streakBonus
+          : -15;
+      const computedRivalDelta =
+        params.overrideRivalDelta !== undefined
+          ? params.overrideRivalDelta
+          : targetRivalCode
+          ? params.won
+            ? -8
+            : 10
+          : 0;
+
+      let actualCountryDelta = computedCountryDelta;
+      let actualRivalDelta = 0;
+
+      setStandings((prev) => {
+        const next = prev.map((s) => {
+          if (s.code === myCountryCode) {
+            const newPoints = Math.max(0, s.points + computedCountryDelta);
+            actualCountryDelta = newPoints - s.points;
+            const nextCountryStreak = params.won ? s.streak + 1 : 0;
+            return {
+              ...s,
+              points: newPoints,
+              wins: s.wins + (params.won ? 1 : 0),
+              losses: s.losses + (params.won ? 0 : 1),
+              streak: nextCountryStreak,
+              bestStreak: Math.max(s.bestStreak, nextCountryStreak),
+              lastDelta: computedCountryDelta < 0 && actualCountryDelta === 0 ? -15 : actualCountryDelta,
+              updatedAt: now,
+            };
+          }
+          if (targetRivalCode && s.code === targetRivalCode) {
+            const newPoints = Math.max(0, s.points + computedRivalDelta);
+            actualRivalDelta = newPoints - s.points;
+            return {
+              ...s,
+              points: newPoints,
+              lastDelta: actualRivalDelta,
+              updatedAt: now,
+            };
+          }
+          return s;
+        });
+        safeStorageSet(STORAGE_KEYS.standings, JSON.stringify(next));
+        return next;
+      });
+
+      const evt: ScoreEvent = {
+        id: `${now}-${Math.random().toString(36).slice(2, 8)}`,
+        playerName,
+        countryCode: myCountryCode,
+        rivalCode: targetRivalCode,
+        challengeId: params.challengeId,
+        category: params.category,
+        won: params.won,
+        countryDelta: computedCountryDelta,
+        rivalDelta: computedRivalDelta,
+        timestamp: now,
+      };
+      setRecentEvents((prev) => {
+        const next = [evt, ...prev].slice(0, 40);
+        safeStorageSet(STORAGE_KEYS.events, JSON.stringify(next));
+        return next;
+      });
+
+      if (params.mode !== 'duel') {
+        setLastServerDelta({
+          countryDelta: computedCountryDelta,
+          rivalDelta: targetRivalCode ? computedRivalDelta : 0,
+        });
+      }
+
+      const historyEntry: UserHistoryEntry = {
+        id: `${now}-${Math.random().toString(36).slice(2, 7)}`,
+        challengeId: params.challengeId,
+        title: params.title,
+        category: params.category,
+        difficulty: params.difficulty,
+        won: params.won,
+        userPointsDelta: computedCountryDelta,
+        countryDelta: computedCountryDelta,
+        countryCode: myCountryCode,
+        rivalCode: targetRivalCode,
+        mode: params.mode,
+        timestamp: now,
+      };
+
+      const prev = userProfileRef.current;
+      const nextStreak =
+        params.nextStreakValue !== undefined
+          ? params.nextStreakValue
+          : params.won
+          ? prev.currentStreak + 1
+          : 0;
+      const nextPts = Math.max(0, prev.userPoints + computedCountryDelta);
+      const prevCatStat = prev.categoryStats?.[params.category] ?? {
+        played: 0,
+        won: 0,
+        points: 0,
+      };
+      const updated: UserProfile = {
+        ...prev,
+        playerName,
+        countryCode: myCountryCode,
+        rivalCode: rivalCountryCode,
+        userPoints: nextPts,
+        wins: prev.wins + (params.won ? 1 : 0),
+        losses: prev.losses + (params.won ? 0 : 1),
+        currentStreak: nextStreak,
+        bestStreak: Math.max(prev.bestStreak, nextStreak),
+        answeredCount: prev.answeredCount + 1,
+        solvedIds:
+          params.won && !prev.solvedIds.includes(params.challengeId)
+            ? [...prev.solvedIds, params.challengeId]
+            : prev.solvedIds,
+        categoryStats: {
+          ...prev.categoryStats,
+          [params.category]: {
+            played: prevCatStat.played + 1,
+            won: prevCatStat.won + (params.won ? 1 : 0),
+            points: prevCatStat.points + computedCountryDelta,
+          },
+        },
+        history: [historyEntry, ...(prev.history || [])].slice(0, 80),
+        updatedAt: now,
+      };
+      setUserProfile(updated);
+      safeStorageSet(STORAGE_KEYS.profile, JSON.stringify(updated));
+
+      if (authUserRef.current && firebaseSyncedUidRef.current === authUserRef.current.uid) {
+        lastRecordedHistoryIdRef.current = historyEntry.id;
+        void recordOutcomeToFirestore(authUserRef.current.uid, updated, historyEntry).catch(
+          (err) => {
+            if (err instanceof Error && err.message.includes('operationType')) {
+              setFirestoreError(err);
+            }
+          }
+        );
+      }
+    },
+    [effectiveRivalCode, myCountryCode, playerName, playerStreak, rivalCountryCode]
+  );
+
   const handleCompleteChallenge = useCallback(
     async (outcome: ChallengeOutcome) => {
       if (submittingLockRef.current || challengeSubmittedRef.current) return;
@@ -793,118 +1085,87 @@ export default function App() {
       }
 
       const controller = new AbortController();
-      const timer = window.setTimeout(() => controller.abort(), 8000);
+      const timer = window.setTimeout(() => controller.abort(), 5000);
 
       try {
-        const res = await fetch('/api/score', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: controller.signal,
-          body: JSON.stringify({
-            userId: userProfile.userId || undefined,
-            countryCode: myCountryCode,
-            rivalCode: effectiveRivalCode,
+        let serverApplied = false;
+        if (backendAvailable !== false) {
+          const data = await fetchJsonSafe<{
+            standings?: CountryStanding[];
+            event?: ScoreEvent;
+            profile?: UserProfile;
+            sharedChallenge?: SharedChallengeInfo;
+          }>('/api/score', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            body: JSON.stringify({
+              userId: userProfile.userId || undefined,
+              countryCode: myCountryCode,
+              rivalCode: effectiveRivalCode,
+              challengeId: outcome.challengeId,
+              challengeTitle: activeChallenge?.title,
+              category: activeChallenge?.category ?? 'enigma',
+              difficulty: activeChallenge?.difficulty ?? 'facile',
+              won: outcome.won,
+              timeLeftRatio: outcome.timeLeftRatio,
+              playerStreak: playerStreak,
+              playerName,
+              mode: sharedChallengeContext ? 'shared' : 'solo',
+              shareId: sharedChallengeContext?.shareId ?? null,
+            }),
+          });
+
+          if (data) {
+            serverApplied = true;
+            if (data.standings) {
+              setStandings(data.standings);
+              safeStorageSet(STORAGE_KEYS.standings, JSON.stringify(data.standings));
+            }
+            if (data.event) {
+              setLastServerDelta({
+                countryDelta: data.event.countryDelta,
+                rivalDelta: data.event.rivalDelta,
+              });
+            }
+            if (data.profile) {
+              applyServerProfile(data.profile, false);
+              const newestEntry = data.profile.history?.[0] as UserHistoryEntry | undefined;
+              if (
+                authUser &&
+                firebaseSyncedUidRef.current === authUser.uid &&
+                newestEntry &&
+                newestEntry.id !== lastRecordedHistoryIdRef.current
+              ) {
+                lastRecordedHistoryIdRef.current = newestEntry.id;
+                void recordOutcomeToFirestore(authUser.uid, data.profile, newestEntry).catch(
+                  (err) => {
+                    if (err instanceof Error && err.message.includes('operationType')) {
+                      setFirestoreError(err);
+                    }
+                  }
+                );
+              }
+            }
+            if (data.sharedChallenge) {
+              const scInfo = data.sharedChallenge;
+              setSharedChallengeContext((prev) =>
+                prev ? { ...prev, info: scInfo } : prev
+              );
+            }
+          }
+        }
+
+        if (!serverApplied) {
+          applyLocalStandaloneOutcome({
             challengeId: outcome.challengeId,
-            challengeTitle: activeChallenge?.title,
+            title: activeChallenge?.title || `Défi #${outcome.challengeId}`,
             category: activeChallenge?.category ?? 'enigma',
             difficulty: activeChallenge?.difficulty ?? 'facile',
             won: outcome.won,
             timeLeftRatio: outcome.timeLeftRatio,
-            playerStreak: playerStreak,
-            playerName,
             mode: sharedChallengeContext ? 'shared' : 'solo',
-            shareId: sharedChallengeContext?.shareId ?? null,
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.standings) setStandings(data.standings);
-          if (data.event) {
-            setLastServerDelta({
-              countryDelta: data.event.countryDelta,
-              rivalDelta: data.event.rivalDelta,
-            });
-          }
-          if (data.profile) {
-            applyServerProfile(data.profile, false);
-            const newestEntry = data.profile.history?.[0] as UserHistoryEntry | undefined;
-            if (
-              authUser &&
-              firebaseSyncedUidRef.current === authUser.uid &&
-              newestEntry &&
-              newestEntry.id !== lastRecordedHistoryIdRef.current
-            ) {
-              lastRecordedHistoryIdRef.current = newestEntry.id;
-              void recordOutcomeToFirestore(authUser.uid, data.profile, newestEntry).catch(
-                (err) => {
-                  if (err instanceof Error && err.message.includes('operationType')) {
-                    setFirestoreError(err);
-                  }
-                }
-              );
-            }
-          }
-          if (data.sharedChallenge) {
-            setSharedChallengeContext((prev) =>
-              prev ? { ...prev, info: data.sharedChallenge } : prev
-            );
-          }
-        }
-      } catch {
-        // Fallback local + Firestore persistence if Express endpoint unreachable
-        const localDelta = outcome.won ? activeChallenge?.basePoints ?? 20 : -15;
-        const now = Date.now();
-        const cat = activeChallenge?.category ?? 'enigma';
-        const diff = activeChallenge?.difficulty ?? 'facile';
-        const fallbackEntry: UserHistoryEntry = {
-          id: `${now}-${Math.random().toString(36).slice(2, 7)}`,
-          challengeId: outcome.challengeId,
-          title: activeChallenge?.title || `Défi #${outcome.challengeId}`,
-          category: cat,
-          difficulty: diff,
-          won: outcome.won,
-          userPointsDelta: localDelta,
-          countryDelta: localDelta,
-          countryCode: myCountryCode,
-          rivalCode: effectiveRivalCode,
-          mode: sharedChallengeContext ? 'shared' : 'solo',
-          timestamp: now,
-        };
-        const prev = userProfileRef.current;
-        const nextPts = Math.max(0, prev.userPoints + localDelta);
-        const prevCatStat = prev.categoryStats?.[cat] ?? { played: 0, won: 0, points: 0 };
-        const updated: UserProfile = {
-          ...prev,
-          userPoints: nextPts,
-          wins: prev.wins + (outcome.won ? 1 : 0),
-          losses: prev.losses + (outcome.won ? 0 : 1),
-          currentStreak: nextStreak,
-          bestStreak: Math.max(prev.bestStreak, nextStreak),
-          answeredCount: prev.answeredCount + 1,
-          solvedIds:
-            outcome.won && !prev.solvedIds.includes(outcome.challengeId)
-              ? [...prev.solvedIds, outcome.challengeId]
-              : prev.solvedIds,
-          categoryStats: {
-            ...prev.categoryStats,
-            [cat]: {
-              played: prevCatStat.played + 1,
-              won: prevCatStat.won + (outcome.won ? 1 : 0),
-              points: prevCatStat.points + localDelta,
-            },
-          },
-          history: [fallbackEntry, ...(prev.history || [])].slice(0, 80),
-          updatedAt: now,
-        };
-        setUserProfile(updated);
-        safeStorageSet(STORAGE_KEYS.profile, JSON.stringify(updated));
-
-        if (authUser && firebaseSyncedUidRef.current === authUser.uid) {
-          lastRecordedHistoryIdRef.current = fallbackEntry.id;
-          void recordOutcomeToFirestore(authUser.uid, updated, fallbackEntry).catch((err) => {
-            if (err instanceof Error && err.message.includes('operationType')) {
-              setFirestoreError(err);
-            }
+            nextStreakValue: nextStreak,
           });
         }
       } finally {
@@ -914,12 +1175,13 @@ export default function App() {
       }
     },
     [
-      activeChallenge?.basePoints,
       activeChallenge?.category,
       activeChallenge?.difficulty,
       activeChallenge?.title,
+      applyLocalStandaloneOutcome,
       applyServerProfile,
       authUser,
+      backendAvailable,
       effectiveRivalCode,
       myCountryCode,
       playerName,
@@ -935,30 +1197,30 @@ export default function App() {
       outcome?: { won: boolean; pointsDelta: number }
     ): Promise<{ url: string; status: 'shared' | 'copied' | 'manual' } | null> => {
       let shareId: string | null = null;
-      const controller = new AbortController();
-      const timer = window.setTimeout(() => controller.abort(), 5000);
-      try {
-        const res = await fetch('/api/shared-challenges', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: controller.signal,
-          body: JSON.stringify({
-            challengeId,
-            userId: userProfile.userId || undefined,
-            playerName,
-            countryCode: myCountryCode,
-            won: outcome ? outcome.won : null,
-            pointsDelta: outcome ? outcome.pointsDelta : 0,
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json();
+      if (backendAvailable !== false) {
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), 4000);
+        try {
+          const data = await fetchJsonSafe<{ sharedChallenge?: { shareId?: string } }>(
+            '/api/shared-challenges',
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              signal: controller.signal,
+              body: JSON.stringify({
+                challengeId,
+                userId: userProfile.userId || undefined,
+                playerName,
+                countryCode: myCountryCode,
+                won: outcome ? outcome.won : null,
+                pointsDelta: outcome ? outcome.pointsDelta : 0,
+              }),
+            }
+          );
           shareId = data?.sharedChallenge?.shareId ?? null;
+        } finally {
+          window.clearTimeout(timer);
         }
-      } catch {
-        // Fallback to deterministic link without server shareId
-      } finally {
-        window.clearTimeout(timer);
       }
 
       if (authUser && firebaseSyncedUidRef.current === authUser.uid) {
@@ -983,6 +1245,8 @@ export default function App() {
         shareId,
         playerName,
         countryCode: myCountryCode,
+        won: outcome ? outcome.won : null,
+        pointsDelta: outcome ? outcome.pointsDelta : 0,
       });
 
       const status = await shareOrCopyLink({
@@ -992,7 +1256,15 @@ export default function App() {
       });
       return { url, status };
     },
-    [authUser, myCountry.flag, myCountry.name, myCountryCode, playerName, userProfile.userId]
+    [
+      authUser,
+      backendAvailable,
+      myCountry.flag,
+      myCountry.name,
+      myCountryCode,
+      playerName,
+      userProfile.userId,
+    ]
   );
 
   const handleShareAndToast = useCallback(
@@ -1007,12 +1279,27 @@ export default function App() {
 
   const handleRestoreSyncCode = useCallback(
     async (syncCode: string): Promise<{ ok: boolean; error?: string }> => {
+      if (backendAvailable === false) {
+        return {
+          ok: false,
+          error:
+            'Sur cet hébergement statique, utilisez la connexion Google ci-dessus pour synchroniser vos appareils.',
+        };
+      }
       try {
-        const res = await fetch('/api/profile/restore', {
+        const res = await fetch(apiUrl('/api/profile/restore'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ syncCode }),
         });
+        const contentType = res.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+          return {
+            ok: false,
+            error:
+              'Serveur de codes indisponible ici. Utilisez la connexion Google pour sauvegarder votre parcours.',
+          };
+        }
         const data = await res.json();
         if (!res.ok || !data?.profile) {
           return { ok: false, error: data?.error || 'Code introuvable.' };
@@ -1023,18 +1310,414 @@ export default function App() {
         return { ok: false, error: 'Impossible de contacter le serveur.' };
       }
     },
-    [applyServerProfile]
+    [applyServerProfile, backendAvailable]
   );
 
-  // Live Duel WS actions
-  const sendWs = useCallback((payload: unknown) => {
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(payload));
-    } else {
-      setDuelError('Connexion temps réel en cours de rétablissement…');
+  const cleanupFallbackDuels = useCallback(() => {
+    if (firestoreDuelUnsubRef.current) {
+      firestoreDuelUnsubRef.current();
+      firestoreDuelUnsubRef.current = null;
+    }
+    if (localDuelBotTimerRef.current !== null) {
+      window.clearTimeout(localDuelBotTimerRef.current);
+      localDuelBotTimerRef.current = null;
     }
   }, []);
+
+  // Auto-join ?room=XXXX via Firestore when running without WebSocket backend
+  useEffect(() => {
+    if (backendAvailable !== false || !pendingRoomJoinRef.current) return;
+    const roomId = pendingRoomJoinRef.current;
+    if (!authReady) return;
+    if (!authUser) {
+      setDuelError(
+        `Connectez-vous avec Google pour rejoindre le salon ${roomId} en direct.`
+      );
+      return;
+    }
+    pendingRoomJoinRef.current = null;
+    setClientId(authUser.uid);
+    setDuelTransport('firestore');
+    void joinFirestoreDuelRoom({
+      uid: authUser.uid,
+      roomId,
+      playerName,
+      countryCode: myCountryCode,
+    })
+      .then((res) => {
+        if (!res.ok) {
+          setDuelError(res.error || 'Salon introuvable.');
+          return;
+        }
+        cleanupFallbackDuels();
+        firestoreDuelUnsubRef.current = subscribeFirestoreDuelRoom(
+          roomId,
+          (room) => {
+            setDuelError(null);
+            setDuelRoom(room);
+          },
+          () => setDuelError(`Salon ${roomId} introuvable ou expiré.`),
+          (err) => setFirestoreError(err)
+        );
+      })
+      .catch((err) => {
+        if (err instanceof Error && err.message.includes('operationType')) {
+          setFirestoreError(err);
+        } else {
+          setDuelError('Impossible de rejoindre le salon.');
+        }
+      });
+  }, [authReady, authUser, backendAvailable, cleanupFallbackDuels, myCountryCode, playerName]);
+
+  // Award country & profile points when a Firestore or Local AI duel finishes
+  useEffect(() => {
+    if (!duelRoom || duelRoom.status !== 'finished') return;
+    if (duelTransport !== 'firestore' && duelTransport !== 'local') return;
+    const finishKey = `${duelRoom.roomId}:${duelRoom.currentRound}`;
+    if (finalizedDuelRoomRef.current === finishKey) return;
+    finalizedDuelRoomRef.current = finishKey;
+
+    if (!duelRoom.winnerClientId) return;
+    const activeMyId = duelTransport === 'firestore' ? authUser?.uid : clientId;
+    if (!activeMyId) return;
+    const won = duelRoom.winnerClientId === activeMyId;
+    const opp = duelRoom.players.find((p) => p.clientId !== activeMyId);
+    const oppCode =
+      opp && opp.countryCode !== myCountryCode ? opp.countryCode : effectiveRivalCode;
+
+    applyLocalStandaloneOutcome({
+      challengeId: duelRoom.challengeIds[0] || 1,
+      title: `Duel Live ${duelRoom.roomId} (5 manches)`,
+      category: 'speed',
+      difficulty: 'moyen',
+      won,
+      timeLeftRatio: 0.5,
+      mode: 'duel',
+      overrideCountryDelta: won ? 60 : -35,
+      overrideRivalDelta: oppCode ? (won ? -35 : 60) : 0,
+      overrideRivalCode: oppCode ?? null,
+    });
+  }, [
+    applyLocalStandaloneOutcome,
+    authUser?.uid,
+    clientId,
+    duelRoom,
+    duelTransport,
+    effectiveRivalCode,
+    myCountryCode,
+  ]);
+
+  useEffect(() => {
+    return () => cleanupFallbackDuels();
+  }, [cleanupFallbackDuels]);
+
+  const startLocalAiDuel = useCallback(() => {
+    cleanupFallbackDuels();
+    finalizedDuelRoomRef.current = null;
+    const myLocalId = userProfile.userId || `local-${Date.now()}`;
+    setClientId(myLocalId);
+    setDuelTransport('local');
+    setDuelError(null);
+    setIsQueued(true);
+
+    localDuelBotTimerRef.current = window.setTimeout(() => {
+      setIsQueued(false);
+      const picked = new Set<number>();
+      const challengeIds: number[] = [];
+      for (const cat of ['enigma', 'logic', 'focus', 'speed', 'riddle'] as const) {
+        const id = pickRandomChallengeId(cat, picked, answeredCount);
+        picked.add(id);
+        challengeIds.push(id);
+      }
+      const oppPool = COUNTRIES.filter((c) => c.code !== myCountryCode);
+      const oppCountry =
+        rivalCountry && rivalCountry.code !== myCountryCode
+          ? rivalCountry
+          : oppPool[Math.floor(Math.random() * oppPool.length)];
+      const botNames = ['Alex', 'Nadia', 'Kenji', 'Sofia', 'Lukas', 'Maya', 'Tariq'];
+      const botName = botNames[Math.floor(Math.random() * botNames.length)];
+
+      setDuelRoom({
+        roomId: 'DUEL',
+        status: 'playing',
+        challengeIds,
+        currentRound: 0,
+        players: [
+          {
+            clientId: myLocalId,
+            playerName,
+            countryCode: myCountryCode,
+            roundScores: [],
+            totalScore: 0,
+            currentRoundDone: false,
+            lastRoundCorrect: null,
+          },
+          {
+            clientId: 'bot-rival',
+            playerName: `${botName} (${oppCountry.code})`,
+            countryCode: oppCountry.code,
+            roundScores: [],
+            totalScore: 0,
+            currentRoundDone: false,
+            lastRoundCorrect: null,
+          },
+        ],
+        winnerClientId: null,
+        countryPointsAwarded: 60,
+        countryPointsLost: 35,
+      });
+    }, 800);
+  }, [
+    answeredCount,
+    cleanupFallbackDuels,
+    myCountryCode,
+    playerName,
+    rivalCountry,
+    userProfile.userId,
+  ]);
+
+  const handleDuelJoinQueue = useCallback(() => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      setDuelTransport('ws');
+      ws.send(
+        JSON.stringify({
+          type: 'duel:queue',
+          userId: userProfile.userId || undefined,
+          playerName,
+          countryCode: myCountryCode,
+        })
+      );
+      return;
+    }
+    startLocalAiDuel();
+  }, [myCountryCode, playerName, startLocalAiDuel, userProfile.userId]);
+
+  const handleDuelCancelQueue = useCallback(() => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'duel:cancel_queue' }));
+    } else {
+      cleanupFallbackDuels();
+      setIsQueued(false);
+    }
+  }, [cleanupFallbackDuels]);
+
+  const handleDuelCreateRoom = useCallback(async () => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      setDuelTransport('ws');
+      ws.send(
+        JSON.stringify({
+          type: 'duel:create',
+          userId: userProfile.userId || undefined,
+          playerName,
+          countryCode: myCountryCode,
+        })
+      );
+      return;
+    }
+
+    let activeUser = authUser;
+    if (!activeUser) {
+      activeUser = await signInWithGoogle();
+      if (!activeUser) {
+        setDuelError(
+          'Connectez-vous avec Google pour créer un salon multijoueur privé en ligne, ou utilisez Matchmaking Mondial.'
+        );
+        return;
+      }
+    }
+
+    try {
+      cleanupFallbackDuels();
+      finalizedDuelRoomRef.current = null;
+      setDuelError(null);
+      setClientId(activeUser.uid);
+      setDuelTransport('firestore');
+      const roomId = await createFirestoreDuelRoom({
+        uid: activeUser.uid,
+        playerName,
+        countryCode: myCountryCode,
+      });
+      firestoreDuelUnsubRef.current = subscribeFirestoreDuelRoom(
+        roomId,
+        (room) => setDuelRoom(room),
+        () => setDuelError('Le salon a été fermé.'),
+        (err) => setFirestoreError(err)
+      );
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('operationType')) {
+        setFirestoreError(err);
+      } else {
+        setDuelError('Impossible de créer le salon pour le moment.');
+      }
+    }
+  }, [
+    authUser,
+    cleanupFallbackDuels,
+    myCountryCode,
+    playerName,
+    signInWithGoogle,
+    userProfile.userId,
+  ]);
+
+  const handleDuelJoinRoom = useCallback(
+    async (roomId: string) => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        setDuelTransport('ws');
+        ws.send(
+          JSON.stringify({
+            type: 'duel:join',
+            roomId,
+            userId: userProfile.userId || undefined,
+            playerName,
+            countryCode: myCountryCode,
+          })
+        );
+        return;
+      }
+
+      let activeUser = authUser;
+      if (!activeUser) {
+        activeUser = await signInWithGoogle();
+        if (!activeUser) {
+          setDuelError('Connectez-vous avec Google pour rejoindre un salon privé.');
+          return;
+        }
+      }
+
+      try {
+        cleanupFallbackDuels();
+        finalizedDuelRoomRef.current = null;
+        setDuelError(null);
+        setClientId(activeUser.uid);
+        setDuelTransport('firestore');
+        const res = await joinFirestoreDuelRoom({
+          uid: activeUser.uid,
+          roomId,
+          playerName,
+          countryCode: myCountryCode,
+        });
+        if (!res.ok) {
+          setDuelError(res.error || 'Salon introuvable.');
+          return;
+        }
+        firestoreDuelUnsubRef.current = subscribeFirestoreDuelRoom(
+          roomId,
+          (room) => setDuelRoom(room),
+          () => setDuelError(`Salon ${roomId} introuvable.`),
+          (err) => setFirestoreError(err)
+        );
+      } catch (err) {
+        if (err instanceof Error && err.message.includes('operationType')) {
+          setFirestoreError(err);
+        } else {
+          setDuelError('Impossible de rejoindre ce salon.');
+        }
+      }
+    },
+    [
+      authUser,
+      cleanupFallbackDuels,
+      myCountryCode,
+      playerName,
+      signInWithGoogle,
+      userProfile.userId,
+    ]
+  );
+
+  const handleDuelSubmitRound = useCallback(
+    (roomId: string, roundIndex: number, won: boolean, timeLeftRatio: number) => {
+      const ws = wsRef.current;
+      if (duelTransport === 'ws' && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            type: 'duel:round_submit',
+            roomId,
+            roundIndex,
+            won,
+            timeLeftRatio,
+          })
+        );
+        return;
+      }
+
+      if (duelTransport === 'firestore' && authUser) {
+        void submitFirestoreDuelRound({
+          roomId,
+          uid: authUser.uid,
+          roundIndex,
+          won,
+          timeLeftRatio,
+        }).catch((err) => {
+          if (err instanceof Error && err.message.includes('operationType')) {
+            setFirestoreError(err);
+          }
+        });
+        return;
+      }
+
+      // Local AI duel round progression
+      setDuelRoom((prev) => {
+        if (!prev || prev.status !== 'playing' || prev.currentRound !== roundIndex) return prev;
+        const clampedRatio = Math.max(0, Math.min(1, Number(timeLeftRatio) || 0));
+        const myRoundPts = won ? 100 + Math.round(clampedRatio * 50) : 0;
+        const botWon = Math.random() < 0.68;
+        const botRoundPts = botWon ? 90 + Math.round(Math.random() * 45) : 0;
+
+        const nextPlayers = prev.players.map((p) => {
+          if (p.clientId === 'bot-rival') {
+            return {
+              ...p,
+              roundScores: [...p.roundScores, botRoundPts],
+              totalScore: p.totalScore + botRoundPts,
+              currentRoundDone: false,
+              lastRoundCorrect: botWon,
+            };
+          }
+          return {
+            ...p,
+            roundScores: [...p.roundScores, myRoundPts],
+            totalScore: p.totalScore + myRoundPts,
+            currentRoundDone: false,
+            lastRoundCorrect: won,
+          };
+        });
+
+        const meAfter = nextPlayers.find((p) => p.clientId !== 'bot-rival')!;
+        const botAfter = nextPlayers.find((p) => p.clientId === 'bot-rival')!;
+        const isLast = roundIndex >= prev.challengeIds.length - 1;
+        return {
+          ...prev,
+          status: isLast ? 'finished' : 'playing',
+          currentRound: isLast ? roundIndex : roundIndex + 1,
+          players: nextPlayers,
+          winnerClientId: isLast
+            ? meAfter.totalScore > botAfter.totalScore
+              ? meAfter.clientId
+              : botAfter.totalScore > meAfter.totalScore
+              ? botAfter.clientId
+              : null
+            : null,
+        };
+      });
+    },
+    [authUser, duelTransport]
+  );
+
+  const handleDuelLeaveRoom = useCallback(() => {
+    const ws = wsRef.current;
+    if (duelTransport === 'ws' && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'duel:leave' }));
+    }
+    cleanupFallbackDuels();
+    setDuelRoom(null);
+    setDuelTransport(null);
+    setDuelError(null);
+    clearShareUrlParams();
+  }, [cleanupFallbackDuels, duelTransport]);
 
   return (
     <div className="min-h-screen bg-[#0B1120] text-slate-100">
@@ -1054,6 +1737,21 @@ export default function App() {
       />
 
       <main>
+        {authError && (
+          <div className="mx-auto mt-4 max-w-[1440px] px-4 sm:px-6">
+            <div className="flex flex-col gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <span className="text-xs font-medium text-rose-200">{authError}</span>
+              <button
+                type="button"
+                onClick={clearAuthError}
+                className="shrink-0 self-start rounded-lg border border-rose-400/30 px-2.5 py-1 text-xs font-semibold text-rose-100 hover:bg-rose-500/20 sm:self-center"
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        )}
+
         {shareToastUrl && (
           <div className="mx-auto mt-4 max-w-[1440px] px-4 sm:px-6">
             <div className="flex flex-col gap-2 rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1138,46 +1836,16 @@ export default function App() {
             isQueued={isQueued}
             duelRoom={duelRoom}
             duelError={duelError}
-            onJoinQueue={() =>
-              sendWs({
-                type: 'duel:queue',
-                userId: userProfile.userId || undefined,
-                playerName,
-                countryCode: myCountryCode,
-              })
-            }
-            onCancelQueue={() => sendWs({ type: 'duel:cancel_queue' })}
-            onCreateRoom={() =>
-              sendWs({
-                type: 'duel:create',
-                userId: userProfile.userId || undefined,
-                playerName,
-                countryCode: myCountryCode,
-              })
-            }
-            onJoinRoom={(roomId) =>
-              sendWs({
-                type: 'duel:join',
-                roomId,
-                userId: userProfile.userId || undefined,
-                playerName,
-                countryCode: myCountryCode,
-              })
-            }
-            onSubmitRound={(roomId, roundIndex, won, timeLeftRatio) =>
-              sendWs({
-                type: 'duel:round_submit',
-                roomId,
-                roundIndex,
-                won,
-                timeLeftRatio,
-              })
-            }
-            onLeaveRoom={() => {
-              sendWs({ type: 'duel:leave' });
-              setDuelRoom(null);
-              clearShareUrlParams();
+            onJoinQueue={handleDuelJoinQueue}
+            onCancelQueue={handleDuelCancelQueue}
+            onCreateRoom={() => {
+              void handleDuelCreateRoom();
             }}
+            onJoinRoom={(roomId) => {
+              void handleDuelJoinRoom(roomId);
+            }}
+            onSubmitRound={handleDuelSubmitRound}
+            onLeaveRoom={handleDuelLeaveRoom}
           />
         )}
 

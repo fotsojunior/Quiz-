@@ -85,20 +85,27 @@ export function Header({
               type="button"
               onClick={onOpenParcours}
               title="Compte Google synchronisé avec Firestore"
-              className="hidden sm:flex items-center gap-1.5 rounded-lg border border-emerald-400/35 bg-emerald-400/10 px-3 py-2 text-xs font-semibold text-emerald-300 hover:bg-emerald-400/20 whitespace-nowrap shrink-0 transition-colors"
+              aria-label="Compte connecté"
+              className="flex items-center gap-1.5 rounded-lg border border-emerald-400/35 bg-emerald-400/10 px-2.5 sm:px-3 py-2 text-xs font-semibold text-emerald-300 hover:bg-emerald-400/20 whitespace-nowrap shrink-0 transition-colors"
             >
               <CloudCheck className="h-4 w-4 text-emerald-400" />
-              <span className="max-w-[96px] truncate">{authUserLabel || 'Synchronisé'}</span>
+              <span className="hidden sm:inline max-w-[96px] truncate">
+                {authUserLabel || 'Synchronisé'}
+              </span>
             </button>
           ) : (
             <button
               type="button"
               onClick={onSignInGoogle}
               disabled={isSigningIn}
-              className="hidden sm:flex items-center gap-1.5 rounded-lg border border-white/15 bg-[#162032] px-3 py-2 text-xs font-semibold text-slate-200 hover:border-amber-400/60 hover:text-white disabled:opacity-50 whitespace-nowrap shrink-0 transition-colors"
+              title="Connexion avec Google"
+              aria-label="Connexion avec Google"
+              className="flex items-center gap-1.5 rounded-lg border border-white/15 bg-[#162032] px-2.5 sm:px-3 py-2 text-xs font-semibold text-slate-200 hover:border-amber-400/60 hover:text-white disabled:opacity-50 whitespace-nowrap shrink-0 transition-colors"
             >
               <LogIn className="h-3.5 w-3.5 text-amber-400" />
-              {isSigningIn ? 'Connexion…' : 'Connexion'}
+              <span className="hidden sm:inline">
+                {isSigningIn ? 'Connexion…' : 'Connexion'}
+              </span>
             </button>
           )}
 
