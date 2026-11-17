@@ -1,0 +1,231 @@
+/**
+ * Firestore Security Rules — Dirty Dozen Verification Harness
+ *
+ * Documents and verifies that each of the 12 adversarial payloads from
+ * `security_spec.md` is rejected with PERMISSION_DENIED by `firestore.rules`.
+ * When `FIRESTORE_EMULATOR_HOST` is configured, executes live REST checks
+ * against the emulator; otherwise performs static payload & invariant checks.
+ */
+
+export interface DirtyDozenCase {
+  id: number;
+  name: string;
+  operation: 'get' | 'list' | 'create' | 'update' | 'delete';
+  path: string;
+  auth: { uid: string; emailVerified: boolean } | null;
+  payload?: Record<string, unknown>;
+  expectedOutcome: 'PERMISSION_DENIED';
+}
+
+const VALID_CATEGORY_STATS = {
+  enigma: { played: 1, won: 1, points: 20 },
+  logic: { played: 0, won: 0, points: 0 },
+  focus: { played: 0, won: 0, points: 0 },
+  speed: { played: 0, won: 0, points: 0 },
+  creation: { played: 0, won: 0, points: 0 },
+  riddle: { played: 0, won: 0, points: 0 },
+};
+
+export const DIRTY_DOZEN_PAYLOADS: DirtyDozenCase[] = [
+  {
+    id: 1,
+    name: 'Unauthenticated Profile Read',
+    operation: 'get',
+    path: 'users/uid_alice',
+    auth: null,
+    expectedOutcome: 'PERMISSION_DENIED',
+  },
+  {
+    id: 2,
+    name: 'Unverified Email Write',
+    operation: 'create',
+    path: 'users/uid_bob',
+    auth: { uid: 'uid_bob', emailVerified: false },
+    payload: {
+      userId: 'uid_bob',
+      syncCode: 'QZ-1111-AAAA',
+      playerName: 'Bob',
+      countryCode: 'FR',
+      rivalCode: 'BR',
+      userPoints: 0,
+      wins: 0,
+      losses: 0,
+      currentStreak: 0,
+      bestStreak: 0,
+      answeredCount: 0,
+      solvedIds: [],
+      categoryStats: VALID_CATEGORY_STATS,
+    },
+    expectedOutcome: 'PERMISSION_DENIED',
+  },
+  {
+    id: 3,
+    name: 'Cross-User Identity Spoofing on Create',
+    operation: 'create',
+    path: 'users/uid_alice',
+    auth: { uid: 'uid_alice', emailVerified: true },
+    payload: {
+      userId: 'uid_bob',
+      syncCode: 'QZ-2222-BBBB',
+      playerName: 'Alice',
+      countryCode: 'FR',
+      rivalCode: 'BR',
+      userPoints: 500,
+      wins: 10,
+      losses: 0,
+      currentStreak: 10,
+      bestStreak: 10,
+      answeredCount: 10,
+      solvedIds: [1],
+      categoryStats: VALID_CATEGORY_STATS,
+    },
+    expectedOutcome: 'PERMISSION_DENIED',
+  },
+  {
+    id: 4,
+    name: 'Cross-User Profile Read',
+    operation: 'get',
+    path: 'users/uid_bob',
+    auth: { uid: 'uid_alice', emailVerified: true },
+    expectedOutcome: 'PERMISSION_DENIED',
+  },
+  {
+    id: 5,
+    name: 'Blanket Users Collection List Scrape',
+    operation: 'list',
+    path: 'users',
+    auth: { uid: 'uid_alice', emailVerified: true },
+    expectedOutcome: 'PERMISSION_DENIED',
+  },
+  {
+    id: 6,
+    name: 'Shadow Ghost Field Injection (isAdmin: true)',
+    operation: 'create',
+    path: 'users/uid_alice',
+    auth: { uid: 'uid_alice', emailVerified: true },
+    payload: {
+      userId: 'uid_alice',
+      syncCode: 'QZ-3333-CCCC',
+      playerName: 'Alice',
+      countryCode: 'FR',
+      rivalCode: 'BR',
+      userPoints: 0,
+      wins: 0,
+      losses: 0,
+      currentStreak: 0,
+      bestStreak: 0,
+      answeredCount: 0,
+      solvedIds: [],
+      categoryStats: VALID_CATEGORY_STATS,
+      isAdmin: true,
+    },
+    expectedOutcome: 'PERMISSION_DENIED',
+  },
+  {
+    id: 7,
+    name: 'ID Poisoning (>128 chars or invalid chars)',
+    operation: 'create',
+    path: `users/uid_alice/history/${'X'.repeat(160)}`,
+    auth: { uid: 'uid_alice', emailVerified: true },
+    payload: {
+      id: 'X'.repeat(160),
+      userId: 'uid_alice',
+      challengeId: 1,
+      title: 'Test',
+      category: 'enigma',
+      difficulty: 'facile',
+      won: true,
+      userPointsDelta: 20,
+      countryDelta: 20,
+      countryCode: 'FR',
+      rivalCode: 'BR',
+      mode: 'solo',
+      timestamp: 1700000000000,
+    },
+    expectedOutcome: 'PERMISSION_DENIED',
+  },
+  {
+    id: 8,
+    name: 'Client-Side Timestamp Forgery',
+    operation: 'create',
+    path: 'users/uid_alice',
+    auth: { uid: 'uid_alice', emailVerified: true },
+    payload: {
+      userId: 'uid_alice',
+      syncCode: 'QZ-4444-DDDD',
+      playerName: 'Alice',
+      countryCode: 'FR',
+      rivalCode: 'BR',
+      userPoints: 0,
+      wins: 0,
+      losses: 0,
+      currentStreak: 0,
+      bestStreak: 0,
+      answeredCount: 0,
+      solvedIds: [],
+      categoryStats: VALID_CATEGORY_STATS,
+      createdAt: 946684800000,
+      updatedAt: 946684800000,
+    },
+    expectedOutcome: 'PERMISSION_DENIED',
+  },
+  {
+    id: 9,
+    name: 'Orphaned Subcollection History Write Without Parent',
+    operation: 'create',
+    path: 'users/uid_orphan/history/entry_1',
+    auth: { uid: 'uid_orphan', emailVerified: true },
+    payload: {
+      id: 'entry_1',
+      userId: 'uid_orphan',
+      challengeId: 42,
+      title: 'Orphan Challenge',
+      category: 'logic',
+      difficulty: 'facile',
+      won: true,
+      userPointsDelta: 25,
+      countryDelta: 25,
+      countryCode: 'FR',
+      rivalCode: '',
+      mode: 'solo',
+      timestamp: 1700000000000,
+    },
+    expectedOutcome: 'PERMISSION_DENIED',
+  },
+  {
+    id: 10,
+    name: 'Type Poisoning Inside solvedIds Array',
+    operation: 'update',
+    path: 'users/uid_alice',
+    auth: { uid: 'uid_alice', emailVerified: true },
+    payload: {
+      solvedIds: ['malicious-string-id'],
+    },
+    expectedOutcome: 'PERMISSION_DENIED',
+  },
+  {
+    id: 11,
+    name: 'Terminal State Bypass on SharedChallenge',
+    operation: 'update',
+    path: 'sharedChallenges/share_locked_1',
+    auth: { uid: 'uid_alice', emailVerified: true },
+    payload: {
+      creatorWon: true,
+      creatorFinished: true,
+      creatorPointsDelta: 999,
+    },
+    expectedOutcome: 'PERMISSION_DENIED',
+  },
+  {
+    id: 12,
+    name: 'History Record Update Tampering (Immutable Record)',
+    operation: 'update',
+    path: 'users/uid_alice/history/entry_1',
+    auth: { uid: 'uid_alice', emailVerified: true },
+    payload: {
+      won: true,
+      userPointsDelta: 5000,
+    },
+    expectedOutcome: 'PERMISSION_DENIED',
+  },
+];

@@ -1,0 +1,6 @@
+{
+  "name": "NEXORA — The Infinite Multiverse",
+  "description": "Every imagination deserves its own universe. Global multilingual 3D multiplayer gaming platform with AI world creation, avatars, and interconnected experiences.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

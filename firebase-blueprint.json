@@ -1,0 +1,288 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Persistent player profile, personal score, country affiliation, category mastery, and bounded solved challenge IDs.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the profile owner.",
+          "minLength": 6,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "syncCode": {
+          "type": "string",
+          "description": "Transferable sync code paired with the Express backend.",
+          "minLength": 2,
+          "maxLength": 24
+        },
+        "playerName": {
+          "type": "string",
+          "description": "Display name chosen by the player.",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "countryCode": {
+          "type": "string",
+          "description": "ISO 3166-1 alpha-2 country code represented by the player.",
+          "minLength": 2,
+          "maxLength": 2,
+          "pattern": "^[A-Z]{2}$"
+        },
+        "rivalCode": {
+          "type": "string",
+          "description": "Target rival country code or empty string when cleared.",
+          "maxLength": 2
+        },
+        "userPoints": {
+          "type": "integer",
+          "description": "Accumulated personal points across solo, shared, and duel challenges."
+        },
+        "wins": {
+          "type": "integer",
+          "description": "Total won challenges and duels."
+        },
+        "losses": {
+          "type": "integer",
+          "description": "Total lost challenges and duels."
+        },
+        "currentStreak": {
+          "type": "integer",
+          "description": "Current consecutive win streak."
+        },
+        "bestStreak": {
+          "type": "integer",
+          "description": "Best consecutive win streak achieved."
+        },
+        "answeredCount": {
+          "type": "integer",
+          "description": "Total challenges completed used for progressive difficulty and timer."
+        },
+        "solvedIds": {
+          "type": "array",
+          "description": "Bounded list (max 2000) of unique solved challenge IDs."
+        },
+        "categoryStats": {
+          "type": "object",
+          "description": "Per-category aggregate counts and points map (enigma, logic, focus, speed, creation, riddle)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last update timestamp."
+        }
+      },
+      "required": [
+        "userId",
+        "syncCode",
+        "playerName",
+        "countryCode",
+        "rivalCode",
+        "userPoints",
+        "wins",
+        "losses",
+        "currentStreak",
+        "bestStreak",
+        "answeredCount",
+        "solvedIds",
+        "categoryStats",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserHistoryEntry": {
+      "title": "UserHistoryEntry",
+      "description": "Immutable record of a completed solo, shared, or live duel challenge in a player's journey.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique entry identifier.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID matching parent user document.",
+          "minLength": 6,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "challengeId": {
+          "type": "integer",
+          "description": "Challenge ID between 1 and 12500."
+        },
+        "title": {
+          "type": "string",
+          "description": "Title of the challenge played.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "category": {
+          "type": "string",
+          "enum": ["enigma", "logic", "focus", "speed", "creation", "riddle"],
+          "description": "Challenge category."
+        },
+        "difficulty": {
+          "type": "string",
+          "enum": ["facile", "moyen", "difficile", "maitre"],
+          "description": "Difficulty tier at the time of play."
+        },
+        "won": {
+          "type": "boolean",
+          "description": "Whether the player succeeded."
+        },
+        "userPointsDelta": {
+          "type": "integer",
+          "description": "Personal score delta."
+        },
+        "countryDelta": {
+          "type": "integer",
+          "description": "Country score delta."
+        },
+        "countryCode": {
+          "type": "string",
+          "description": "Country defended by the player.",
+          "minLength": 2,
+          "maxLength": 2,
+          "pattern": "^[A-Z]{2}$"
+        },
+        "rivalCode": {
+          "type": "string",
+          "description": "Targeted rival country code or empty string.",
+          "maxLength": 2
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["solo", "duel", "shared"],
+          "description": "Game mode."
+        },
+        "timestamp": {
+          "type": "integer",
+          "description": "Epoch milliseconds of completion."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "challengeId",
+        "title",
+        "category",
+        "difficulty",
+        "won",
+        "userPointsDelta",
+        "countryDelta",
+        "countryCode",
+        "rivalCode",
+        "mode",
+        "timestamp",
+        "createdAt"
+      ]
+    },
+    "SharedChallenge": {
+      "title": "SharedChallenge",
+      "description": "Challenge share record created by an authenticated player.",
+      "type": "object",
+      "properties": {
+        "shareId": {
+          "type": "string",
+          "description": "Unique share identifier.",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "creatorUserId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the player who created the share link.",
+          "minLength": 6,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "challengeId": {
+          "type": "integer",
+          "description": "Shared challenge ID between 1 and 12500."
+        },
+        "creatorName": {
+          "type": "string",
+          "description": "Creator display name.",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "creatorCountryCode": {
+          "type": "string",
+          "description": "Creator country code.",
+          "minLength": 2,
+          "maxLength": 2,
+          "pattern": "^[A-Z]{2}$"
+        },
+        "creatorWon": {
+          "type": "boolean",
+          "description": "Creator outcome once completed."
+        },
+        "creatorFinished": {
+          "type": "boolean",
+          "description": "Terminal lock flag once creator has recorded their final outcome."
+        },
+        "creatorPointsDelta": {
+          "type": "integer",
+          "description": "Points delta scored by the creator."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last update timestamp."
+        }
+      },
+      "required": [
+        "shareId",
+        "creatorUserId",
+        "challengeId",
+        "creatorName",
+        "creatorCountryCode",
+        "creatorWon",
+        "creatorFinished",
+        "creatorPointsDelta",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Owner-only player profile, points, and progression summary."
+    },
+    "/users/{userId}/history/{entryId}": {
+      "schema": {
+        "$ref": "#/entities/UserHistoryEntry"
+      },
+      "description": "Owner-only subcollection of individual challenge and duel journey entries."
+    },
+    "/sharedChallenges/{shareId}": {
+      "schema": {
+        "$ref": "#/entities/SharedChallenge"
+      },
+      "description": "Authenticated user's shared challenge records with terminal outcome locking."
+    }
+  }
+}
